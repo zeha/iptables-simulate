@@ -203,7 +203,7 @@ def match_rules_inner(match_opts, table, chain, level):
                                 break
 
                 if matched:
-                        print TerminalColor.colored(TerminalColor.GREEN, ' -> matched %s')
+                        print TerminalColor.colored(TerminalColor.GREEN, ' -> matched')
                         if rule.has_key('jump'):
                                 if rule.jump in final_targets:
                                         print "=== Rule reached target: %s" % TerminalColor.colored(TerminalColor.YELLOW, rule.jump)
