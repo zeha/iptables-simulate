@@ -1,6 +1,12 @@
+#!/usr/bin/python
+#
+# Parses output from iptables-save and matches it against a supplied "packet".
+#
 
 import sys
 from optparse import OptionParser
+
+input_filename = 'rules-live.iptablessave'
 
 final_targets = ['ACCEPT','DROP','QUEUE','RETURN','REJECT','DNAT','MARK','MASQUERADE','SNAT','NOTRACK','REDIRECT']
 continue_targets = ['LOG','ULOG']
@@ -13,6 +19,10 @@ class TerminalColor:
         GREEN = '\033[92m'
         YELLOW = '\033[93m'
         ENDC = '\033[0m'
+
+        @staticmethod
+        def colored(color, string):
+                return '%s%s%s' % (color, string, TerminalColor.ENDC)
 
 # dict-style object which also allows attribute-based access to the dict
 class ObjectDict(dict):
@@ -38,7 +48,7 @@ class IptablesRule(ObjectDict):
                 keys.sort(cmp=keysorter)
                 for key in keys:
                         value = self[key]
-                        if key == 'jump' or key == 'goto': value = '%s%s%s' % (TerminalColor.YELLOW, value, TerminalColor.ENDC)
+                        if key == 'jump' or key == 'goto': value = TerminalColor.colored(TerminalColor.YELLOW, value)
                         x.append("%s %s" % (iptables_optdests[key]['opt'], value))
                 return " ".join(x)
 
@@ -169,7 +179,7 @@ def match_rules_inner(match_opts, table, chain, level):
         global checked_rules_count
         prefix = " " * level
         level = level + 1
-        print prefix, '%s>> table %s chain%s %s%s' % (TerminalColor.RED, table, TerminalColor.YELLOW, chain, TerminalColor.ENDC)
+        print prefix, '%s>> table %s chain %s' % (TerminalColor.RED, table, TerminalColor.colored(TerminalColor.YELLOW, chain))
         my_rv = False
         for rule in rules[table][chain]:
                 checked_rules_count = checked_rules_count + 1
@@ -193,14 +203,14 @@ def match_rules_inner(match_opts, table, chain, level):
                                 break
 
                 if matched:
-                        print '%s -> matched %s' % (TerminalColor.GREEN, TerminalColor.ENDC)
+                        print TerminalColor.colored(TerminalColor.GREEN, ' -> matched %s')
                         if rule.has_key('jump'):
                                 if rule.jump in final_targets:
-                                        print "=== Rule reached target: %s" % rule.jump
+                                        print "=== Rule reached target: %s" % TerminalColor.colored(TerminalColor.YELLOW, rule.jump)
                                         my_rv = True
                                         break
                                 if rule.jump in continue_targets:
-                                        print "--- Rule triggered target: %s" % rule.jump
+                                        print "--- Rule triggered target: %s" % TerminalColor.colored(TerminalColor.YELLOW, rule.jump)
                                         continue
                                 rv = match_rules_inner(match_opts, table, rule.jump, level)
                                 if rv:
@@ -236,7 +246,7 @@ def main():
 
         apply_matchopts_defaults(match_opts)
 
-        load_rules('live-rules')
+        load_rules(input_filename)
 
         match_rules(match_opts)
 
