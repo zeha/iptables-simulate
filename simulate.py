@@ -2,6 +2,13 @@
 import sys
 from optparse import OptionParser
 
+final_targets = ['ACCEPT','DROP','QUEUE','RETURN','REJECT','DNAT','MARK','MASQUERADE','SNAT','NOTRACK','REDIRECT']
+continue_targets = ['LOG','ULOG']
+
+rules = {}
+policies = {}
+
+# dict-style object which also allows attribute-based access to the dict
 class ObjectDict(dict):
         def __setattr__(self,k,v):
                 self[k] = v
@@ -10,6 +17,7 @@ class ObjectDict(dict):
         def __delattr__(self,k):
                 del self[k]
 
+# ObjectDict with nicer print-ability
 class IptablesRule(ObjectDict):
         def __str__(self):
                 def keysorter(a,b):
@@ -80,80 +88,73 @@ def add_iptables_options_to_optparser(parser):
                 dst = iptables_options[opt]['dest']
                 parser.add_option(opt, dest=dst)
 
-init_iptables_options()
+def apply_matchopts_defaults(match_opts):
+        # policy module ...
+        if not match_opts.has_key('policy_pol'):
+                # default to no IPsec
+                match_opts.policy_pol = 'none'
+        if not match_opts.has_key('policy_dir'):
+                # these are the only valid values, anyway
+                if match_opts.chain in "PREROUTING,INPUT".split(','): match_opts.policy_dir = 'in'
+                if match_opts.chain in "POSTROUTING,OUTPUT".split(','): match_opts.policy_dir = 'out'
+                # FORWARD can have policy in or out. default to in.
+                if match_opts.chain in ['FORWARD']: match_opts.policy_dir = 'in'
+        # state module ...
+        if not match_opts.has_key('state'):
+                match_opts.state = 'NEW'
 
-prog_parser = OptionParser()
-add_iptables_options_to_optparser(prog_parser)
-(match_opts, prog_args) = prog_parser.parse_args(values=ObjectDict())
 
-if not match_opts.has_key('chain'):
-        print "E: -A CHAIN is required"
-        sys.exit(1)
-if not match_opts.has_key('table'):
-        print "E: -t table is required"
-        sys.exit(1)
+def load_rules(filename):
+        # prepare ruleparser
+        iptables_parser = OptionParser()
+        add_iptables_options_to_optparser(iptables_parser)
 
-iptables_parser = OptionParser()
-add_iptables_options_to_optparser(iptables_parser)
+        table = ''
+        count = 0
+        rulesfile = file(filename, 'r')
+        for line in rulesfile:
+                if line.startswith('#'): continue
+                if line.startswith('*'):
+                        table = line[1:].strip()
+                        print "Loading table %s" % table
+                        rules[table] = {}
+                        policies[table] = {}
+                        continue
+                if line.startswith('COMMIT'):
+                        table = ''
+                        continue
+                if line.startswith(':'):
+                        rules[table][line[1:].strip().split(' ')[0]] = []
+                        policies[table][line[1:].strip().split(' ')[0]] = line[1:].strip().split(' ')[1]
+                        continue
 
-rules = {}
-policies = {}
+                count = count + 1
 
-table = ''
-count = 0
-rulesfile = file('live-rules', 'r')
-for line in rulesfile:
-        if line.startswith('#'): continue
-        if line.startswith('*'):
-                table = line[1:].strip()
-                print "Loading table %s" % table
-                rules[table] = {}
-                policies[table] = {}
-                continue
-        if line.startswith('COMMIT'):
-                table = ''
-                continue
-        if line.startswith(':'):
-                rules[table][line[1:].strip().split(' ')[0]] = []
-                policies[table][line[1:].strip().split(' ')[0]] = line[1:].strip().split(' ')[1]
-                continue
+                (rule, rule_args) = iptables_parser.parse_args(line.split(' '), values=IptablesRule())
+                rule.table = table
+                rules[table][rule.chain].append(rule)
 
-        count = count + 1
+        print "Loaded %d rules" % count
 
-        (rule, rule_args) = iptables_parser.parse_args(line.split(' '), values=IptablesRule())
-        rule.table = table
-        rules[table][rule.chain].append(rule)
-
-print "Loaded %d rules" % count
-
-final_targets = ['ACCEPT','DROP','QUEUE','RETURN','REJECT','DNAT','MARK','MASQUERADE','SNAT','NOTRACK','REDIRECT']
-continue_targets = ['LOG','ULOG']
-
-# policy module ...
-if not match_opts.has_key('policy_pol'):
-        # default to no IPsec
-        match_opts.policy_pol = 'none'
-if not match_opts.has_key('policy_dir'):
-        # these are the only valid values, anyway
-        if match_opts.chain in "PREROUTING,INPUT".split(','): match_opts.policy_dir = 'in'
-        if match_opts.chain in "POSTROUTING,OUTPUT".split(','): match_opts.policy_dir = 'out'
-        # FORWARD can have policy in or out. default to in.
-        if match_opts.chain in ['FORWARD']: match_opts.policy_dir = 'in'
-# state module ...
-if not match_opts.has_key('state'):
-        match_opts.state = 'NEW'
+def match_rules(match_opts):
+        global checked_rules_count
+        checked_rules_count = 0
+        table = match_opts.table
+        chain = match_opts.chain
+        rv = match_rules_inner(match_opts, table, chain, 0)
+        if not rv:
+                print "Applying POLICY: %s" % policies[table][chain]
+        print "Checked %d rules" % checked_rules_count
 
 # reentrant
-level = 0
-count = 0
-def match_rules(table, chain):
-        global level, count
+def match_rules_inner(match_opts, table, chain, level):
+        global checked_rules_count
         prefix = " " * level
         level = level + 1
         print prefix, ">> table %s chain %s" % (table, chain)
         rc = False
         for rule in rules[table][chain]:
-                count = count + 1
+                checked_rules_count = checked_rules_count + 1
                 print prefix, rule,
                 have_all = True
                 for opt in rule.keys():
@@ -183,26 +184,43 @@ def match_rules(table, chain):
                                 if rule.jump in continue_targets:
                                         print "--- Rule triggered target: %s" % rule.jump
                                         continue
-                                rv = match_rules(table, rule.jump)
+                                rv = match_rules_inner(match_opts, table, rule.jump, level)
                                 if rv:
                                         rc = True
                                         break
                         if rule.has_key('goto'):
-                                match_rules(table, rule.goto)
+                                match_rules_inner(match_opts, table, rule.goto, level)
                                 rc = False
                                 break
                 else:
                         print " (matches not satisfied)"
-        level = level - 1
         if not rc:
                 print prefix, "<< returning to previous chain"
                 return
         if rc:
                 return True
 
-rv = match_rules(match_opts.table, match_opts.chain)
-if not rv:
-        print "Applying POLICY: %s" % policies[match_opts.table][match_opts.chain]
 
-print "Checked %d rules" % count
+def main():
+        init_iptables_options()
+
+        # parse command line args
+        prog_parser = OptionParser()
+        add_iptables_options_to_optparser(prog_parser)
+        (match_opts, prog_args) = prog_parser.parse_args(values=ObjectDict())
+
+        if not match_opts.has_key('chain'):
+                print "E: -A CHAIN is required"
+                sys.exit(1)
+        if not match_opts.has_key('table'):
+                print "E: -t table is required"
+                sys.exit(1)
+
+        apply_matchopts_defaults(match_opts)
+
+        load_rules('live-rules')
+
+        match_rules(match_opts)
+
+main()
 
