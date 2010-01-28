@@ -8,6 +8,12 @@ continue_targets = ['LOG','ULOG']
 rules = {}
 policies = {}
 
+class TerminalColor:
+        RED = '\033[91m'
+        GREEN = '\033[92m'
+        YELLOW = '\033[93m'
+        ENDC = '\033[0m'
+
 # dict-style object which also allows attribute-based access to the dict
 class ObjectDict(dict):
         def __setattr__(self,k,v):
@@ -22,14 +28,18 @@ class IptablesRule(ObjectDict):
         def __str__(self):
                 def keysorter(a,b):
                         typetable = {'ignore': 0, 'action': 2, 'match': 1, 'targetarg': 3}
-                        typesort = typetable[iptables_optdests[a]['type']].__cmp__(typetable[iptables_optdests[b]['type']])
-                        if not typesort == 0: return typesort
+                        typesort_a = typetable[iptables_optdests[a]['type']]
+                        typesort_b = typetable[iptables_optdests[b]['type']]
+                        if typesort_a > typesort_b: return 1
+                        if typesort_a < typesort_b: return -1
                         return a > b
                 x = []
                 keys = self.keys()
                 keys.sort(cmp=keysorter)
                 for key in keys:
-                        x.append("%s %s" % (iptables_optdests[key]['opt'], self[key]))
+                        value = self[key]
+                        if key == 'jump' or key == 'goto': value = '%s%s%s' % (TerminalColor.YELLOW, value, TerminalColor.ENDC)
+                        x.append("%s %s" % (iptables_optdests[key]['opt'], value))
                 return " ".join(x)
 
 iptables_options = ObjectDict()
@@ -57,8 +67,8 @@ def init_iptables_options():
         add_iptables_option("-o", dest="out_iface")
         add_iptables_option("-s", dest="source_ip")
         add_iptables_option("-d", dest="dest_ip")
-        add_iptables_option("--dir", dest="policy_dir")
         add_iptables_option("--pol", dest="policy_pol")
+        add_iptables_option("--dir", dest="policy_dir")
         add_iptables_option("-p", dest="protocol")
         add_iptables_option("--sport", dest="sport")
         add_iptables_option("--sports", dest="sports")
@@ -93,15 +103,18 @@ def apply_matchopts_defaults(match_opts):
         if not match_opts.has_key('policy_pol'):
                 # default to no IPsec
                 match_opts.policy_pol = 'none'
+                print '(setting default: policy_pol = %s)' % match_opts.policy_pol
         if not match_opts.has_key('policy_dir'):
                 # these are the only valid values, anyway
                 if match_opts.chain in "PREROUTING,INPUT".split(','): match_opts.policy_dir = 'in'
                 if match_opts.chain in "POSTROUTING,OUTPUT".split(','): match_opts.policy_dir = 'out'
                 # FORWARD can have policy in or out. default to in.
                 if match_opts.chain in ['FORWARD']: match_opts.policy_dir = 'in'
+                print '(setting default: policy_dir = %s)' % match_opts.policy_dir
         # state module ...
         if not match_opts.has_key('state'):
                 match_opts.state = 'NEW'
+                print '(setting default: state = %s)' % match_opts.state
 
 
 def load_rules(filename):
@@ -132,6 +145,11 @@ def load_rules(filename):
 
                 (rule, rule_args) = iptables_parser.parse_args(line.split(' '), values=IptablesRule())
                 rule.table = table
+
+                # HACK: policy module seems to ignore --dir if --pol none is set
+                if rule.has_key('policy_pol') and rule.has_key('policy_dir'):
+                        if rule.policy_pol == 'none': del rule['policy_dir']
+
                 rules[table][rule.chain].append(rule)
 
         print "Loaded %d rules" % count
@@ -151,8 +169,8 @@ def match_rules_inner(match_opts, table, chain, level):
         global checked_rules_count
         prefix = " " * level
         level = level + 1
-        print prefix, ">> table %s chain %s" % (table, chain)
-        rc = False
+        print prefix, '%s>> table %s chain%s %s%s' % (TerminalColor.RED, table, TerminalColor.YELLOW, chain, TerminalColor.ENDC)
+        my_rv = False
         for rule in rules[table][chain]:
                 checked_rules_count = checked_rules_count + 1
                 print prefix, rule,
@@ -175,29 +193,29 @@ def match_rules_inner(match_opts, table, chain, level):
                                 break
 
                 if matched:
-                        print " -> matched"
+                        print '%s -> matched %s' % (TerminalColor.GREEN, TerminalColor.ENDC)
                         if rule.has_key('jump'):
                                 if rule.jump in final_targets:
                                         print "=== Rule reached target: %s" % rule.jump
-                                        rc = True
+                                        my_rv = True
                                         break
                                 if rule.jump in continue_targets:
                                         print "--- Rule triggered target: %s" % rule.jump
                                         continue
                                 rv = match_rules_inner(match_opts, table, rule.jump, level)
                                 if rv:
-                                        rc = True
+                                        my_rv = True
                                         break
                         if rule.has_key('goto'):
-                                match_rules_inner(match_opts, table, rule.goto, level)
-                                rc = False
+                                rv = match_rules_inner(match_opts, table, rule.goto, level)
+                                if rv: my_rv = True
                                 break
                 else:
                         print " (matches not satisfied)"
-        if not rc:
+        if not my_rv:
                 print prefix, "<< returning to previous chain"
                 return
-        if rc:
+        if my_rv:
                 return True
 
 
